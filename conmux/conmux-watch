@@ -1,0 +1,137 @@
+#!/usr/bin/perl
+#
+# conmux-watch <host>/<machine> -- non-interactive client interface
+#
+# The non-interactive client interace to conmux.
+#
+# (C) Copyright IBM Corp. 2004, 2005, 2006
+# Author: Andy Whitcroft <andyw@uk.ibm.com>
+#
+# The Console Multiplexor is released under the GNU Public License V2
+#
+$| = 1;
+
+our $P = 'conmux-watch';
+
+use FindBin;
+use POSIX qw(errno_h BUFSIZ);
+use IO::Socket;
+use Getopt::Long qw(:config no_auto_abbrev);
+
+my $CONMUX = $FindBin::Bin;
+my $CONMUX = $ENV{'CONMUX_ROOT'} if ($ENV{'CONMUX_ROOT'});
+
+# Find our internal libraries.
+use lib $FindBin::Bin;
+use Conmux;
+
+my $bot;
+my $list;
+my $status;
+GetOptions(
+        'b|bot=s'	=> \$bot,
+	'l|list'	=> \$list,
+	's|status'	=> \$status,
+);
+sub usage {
+	warn "Usage: $P <service>\n";
+	warn "       $P <registry>/<service>\n";
+	warn "       $P <host>:<port>\n";
+	warn "       $P --status <service>\n";
+	die  "       $P --list [<registry>]\n";
+}
+
+my $id;
+if ($bot) {
+	$id = 'bot:' . $bot;
+} else {
+	$id = 'user:' . $ENV{'LOGNAME'};
+}
+
+#
+# MODE: registry list.
+#
+if ($list) {
+	if ($#ARGV == -1) {
+		print Conmux::Registry::list('-');
+
+	} elsif ($#ARGV == 0) {
+		print Conmux::Registry::list($ARGV[0]);
+
+	} else {
+		usage();
+	}
+	exit 0
+}
+
+#
+# COMMAND: payload status command
+#
+if ($status) {
+	usage() if ($#ARGV != 0);
+
+	my $sock;
+	eval {
+		$sock = Conmux::connect($ARGV[0]);
+	};
+	if ($@) {
+		print "unavailable\n";
+		exit 0
+	}
+	my %r = Conmux::sendCmd($sock, 'CONNECT', { 'id' => $id,
+		'to' => 'console', 'hide' => 1 });
+	if ($r{'status'} ne 'OK') {
+		print "unavailable\n";
+
+	} elsif ($r{'state'}) {
+		print "$r{'state'}\n";
+
+	} else {
+		print "unknown\n";
+	}
+	exit 0;
+}
+
+
+#
+# COMMAND: general payload connect.
+#
+if ($#ARGV != 0) {
+	usage();
+}
+
+# Connect to the host/port specified on the command line,
+# or localhost:23
+my $sock = Conmux::connect($ARGV[0]);
+
+my %r = Conmux::sendCmd($sock, 'CONNECT', { 'id' => $id, 'to' => 'console' });
+die "$P: $ARGV[0]: connect failed - $r{'status'}\n" if ($r{'status'} ne 'OK');
+
+my $rin = $win = $ein = '';
+vec($rin, fileno($sock), 1) = 1;
+my $ein = $rin | $win;
+
+while (1) {
+	$nfound = select($rout=$rin, $wout=$win, $eout=$ein, undef);
+	if ($nfound < 0) {
+		if ($! == EINTR || $! == EAGAIN) {
+			next;
+		}
+		die "$P: select failed - $!\n";
+	}
+
+	if (vec($rout, fileno($sock), 1)) {
+		$len = sysread($sock, $data, 4096);
+		if ($len <= 0) {
+			if ($len < 0) {
+				if ($! == EINTR || $! == EAGAIN) {
+					next;
+				}
+				die "$P: server: read failed - $!\n";
+			}
+			print STDERR "Connection Closed (server)\n";
+			last;
+		}
+		print $data;
+	}
+}
